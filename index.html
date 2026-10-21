@@ -671,8 +671,8 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
   import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-  import { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider,
-           linkWithPopup, signInWithCredential } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider,
+         linkWithPopup, signInWithPopup, signInWithCredential } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyB9_ru2zDvDtsyFl48Jv_r-h0ZfZf-39ys",
@@ -783,20 +783,30 @@ function refreshButtons() {
 
   // Upgrade the anonymous account to Google so scores follow you across devices.
   googleBtn.addEventListener("click", async function () {
-    const provider = new GoogleAuthProvider();
-    try {
+  const provider = new GoogleAuthProvider();
+  try {
+    if (auth.currentUser && auth.currentUser.isAnonymous) {
+      // 1. Upgrade/Link current anonymous guest session to Google
       await linkWithPopup(auth.currentUser, provider);
-      currentUser = auth.currentUser;
-      refreshButtons();
-    } catch (e) {
-      if (e.code === "auth/credential-already-in-use") {
-        await signInWithCredential(auth, GoogleAuthProvider.credentialFromError(e));
-      } else {
-        console.error(e);
-        alert("Google sign-in failed: " + (e.code || e.message));
-      }
+    } else {
+      // 2. Direct sign-in with Google if not currently logged in as anonymous user
+      await signInWithPopup(auth, provider);
     }
-  });
+    currentUser = auth.currentUser;
+    refreshButtons();
+  } catch (e) {
+    if (e.code === "auth/credential-already-in-use") {
+      try {
+        await signInWithCredential(auth, GoogleAuthProvider.credentialFromError(e));
+      } catch (err) {
+        console.error("Credential sign-in failed", err);
+      }
+    } else {
+      console.error(e);
+      alert("Google sign-in failed: " + (e.message || e.code));
+    }
+  }
+});
 
   // Import the JSON copied from the old local file. Extra keys from other games are ignored.
   importBtn.addEventListener("click", function () {
