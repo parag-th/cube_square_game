@@ -732,12 +732,15 @@
     return out;
   }
 
-  function refreshButtons() {
-    googleBtn.style.display = currentUser && currentUser.isAnonymous ? "inline-block" : "none";
-    statusEl.textContent = !currentUser ? "Cloud: offline"
-      : currentUser.isAnonymous ? "Cloud: synced (this browser only)"
-      : "Cloud: synced (" + (currentUser.email || "Google") + ")";
-  }
+function refreshButtons() {
+  // Show the Google button if there is no user OR if the user is currently anonymous
+  const isGoogleUser = currentUser && !currentUser.isAnonymous;
+  googleBtn.style.display = isGoogleUser ? "none" : "inline-block";
+  
+  statusEl.textContent = !currentUser ? "Cloud: offline"
+    : currentUser.isAnonymous ? "Cloud: synced (this browser only)"
+    : "Cloud: synced (" + (currentUser.email || "Google") + ")";
+}
 
   async function pushToCloud() {
     if (!currentUser || !ready) return;
