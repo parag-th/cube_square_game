@@ -368,6 +368,7 @@
   }
   function saveNumber(key, value) {
     try { localStorage.setItem(key, String(value)); } catch (e) { /* unavailable */ }
+    if (window.cloudSave) window.cloudSave();
   }
 
   function formatTime(ms) {
@@ -653,8 +654,165 @@
   endBtn.addEventListener("click", function () { endGame(false); });
   answerForm.addEventListener("submit", handleSubmit);
 
+  // Lets the Firebase sync code refresh the screen after cloud data is loaded.
+  window.squaresCubesGame = { reload: refreshStartStats };
+
   refreshStartStats();
 })();
+</script>
+
+<!-- ===== Firebase cloud sync ===== -->
+<div id="syncBox" style="position:fixed;right:12px;bottom:12px;z-index:50;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;max-width:92vw;font:12px/1.2 system-ui,sans-serif;color:#b9b4e6;background:rgba(10,8,40,.9);border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:8px 10px;">
+  <span id="syncStatus">Cloud: connecting…</span>
+  <button id="googleBtn" type="button" style="display:none;cursor:pointer;font:inherit;color:#fff;background:#2a2670;border:1px solid rgba(255,255,255,.25);border-radius:6px;padding:4px 8px;">Sign in with Google</button>
+  <button id="importBtn" type="button" style="cursor:pointer;font:inherit;color:#fff;background:#2a2670;border:1px solid rgba(255,255,255,.25);border-radius:6px;padding:4px 8px;">Import backup</button>
+</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+  import { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider,
+           linkWithPopup, signInWithCredential } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+  const firebaseConfig = {
+    apiKey: "PASTE_YOUR_REAL_API_KEY_HERE",
+    authDomain: "cube-square-game.firebaseapp.com",
+    projectId: "cube-square-game",
+    storageBucket: "cube-square-game.firebasestorage.app",
+    messagingSenderId: "813001570185",
+    appId: "1:813001570185:web:656bb4aaaa17a4aa6f5358",
+    measurementId: "G-Y6S7QES3T9"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const auth = getAuth(app);
+
+  // Every localStorage key this game uses starts with "sc_"
+  // e.g. sc_squares_normal_highScore, sc_cubes_pro_bestTimeMs
+  const PREFIX = "sc_";
+
+  const statusEl = document.getElementById("syncStatus");
+  const googleBtn = document.getElementById("googleBtn");
+  const importBtn = document.getElementById("importBtn");
+  let currentUser = null;
+  let ready = false; // true once the first cloud merge has finished
+
+  function num(v) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : 0; }
+
+  function readLocal() {
+    const out = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(PREFIX)) out[k] = num(localStorage.getItem(k));
+    }
+    return out;
+  }
+
+  function writeLocal(scores) {
+    Object.keys(scores).forEach(function (k) {
+      if (k.startsWith(PREFIX)) localStorage.setItem(k, String(num(scores[k])));
+    });
+  }
+
+  // Keep the best of both sides. Scores/streaks: higher wins.
+  // Best times (…_bestTimeMs): lower wins, and 0 means "no time yet".
+  function merge(a, b) {
+    a = a || {}; b = b || {};
+    const out = {};
+    new Set([...Object.keys(a), ...Object.keys(b)]).forEach(function (k) {
+      if (!k.startsWith(PREFIX)) return;
+      const x = num(a[k]), y = num(b[k]);
+      if (k.endsWith("_bestTimeMs")) {
+        out[k] = x > 0 && y > 0 ? Math.min(x, y) : Math.max(x, y);
+      } else {
+        out[k] = Math.max(x, y);
+      }
+    });
+    return out;
+  }
+
+  function refreshButtons() {
+    googleBtn.style.display = currentUser && currentUser.isAnonymous ? "inline-block" : "none";
+    statusEl.textContent = !currentUser ? "Cloud: offline"
+      : currentUser.isAnonymous ? "Cloud: synced (this browser only)"
+      : "Cloud: synced (" + (currentUser.email || "Google") + ")";
+  }
+
+  async function pushToCloud() {
+    if (!currentUser || !ready) return;
+    try {
+      await setDoc(doc(db, "users", currentUser.uid),
+        { scores: readLocal(), updatedAt: serverTimestamp() }, { merge: true });
+    } catch (e) { console.error("Cloud save failed", e); statusEl.textContent = "Cloud: save failed"; }
+  }
+
+  // The game calls this after every save (debounced so we don't spam Firestore).
+  let timer = null;
+  window.cloudSave = function () { clearTimeout(timer); timer = setTimeout(pushToCloud, 500); };
+
+  async function syncDown(user) {
+    ready = false;
+    try {
+      const snap = await getDoc(doc(db, "users", user.uid));
+      const remote = snap.exists() ? (snap.data().scores || {}) : {};
+      writeLocal(merge(readLocal(), remote));
+      window.squaresCubesGame && window.squaresCubesGame.reload();
+      ready = true;
+      await pushToCloud();
+    } catch (e) {
+      console.error("Cloud sync failed", e);
+      statusEl.textContent = "Cloud: sync failed (see console)";
+      return;
+    }
+    refreshButtons();
+  }
+
+  onAuthStateChanged(auth, function (user) {
+    currentUser = user;
+    refreshButtons();
+    if (user) syncDown(user);
+  });
+  signInAnonymously(auth).catch(function (e) {
+    console.error("Anonymous sign-in failed", e);
+    statusEl.textContent = "Cloud: sign-in failed (see console)";
+  });
+
+  // Upgrade the anonymous account to Google so scores follow you across devices.
+  googleBtn.addEventListener("click", async function () {
+    const provider = new GoogleAuthProvider();
+    try {
+      await linkWithPopup(auth.currentUser, provider);
+      currentUser = auth.currentUser;
+      refreshButtons();
+    } catch (e) {
+      if (e.code === "auth/credential-already-in-use") {
+        await signInWithCredential(auth, GoogleAuthProvider.credentialFromError(e));
+      } else {
+        console.error(e);
+        alert("Google sign-in failed: " + (e.code || e.message));
+      }
+    }
+  });
+
+  // Import the JSON copied from the old local file. Extra keys from other games are ignored.
+  importBtn.addEventListener("click", function () {
+    const text = prompt("Paste the JSON exported from your old localStorage:");
+    if (!text) return;
+    try {
+      const old = JSON.parse(text);
+      const imported = {};
+      Object.keys(old).forEach(function (k) { if (k.startsWith(PREFIX)) imported[k] = num(old[k]); });
+      const count = Object.keys(imported).length;
+      if (!count) { alert("No scores for this game were found in that JSON (looking for keys starting with \"sc_\")."); return; }
+      writeLocal(merge(readLocal(), imported));
+      window.squaresCubesGame && window.squaresCubesGame.reload();
+      pushToCloud();
+      alert("Imported " + count + " score values!");
+    } catch (e) {
+      alert("That doesn't look like valid JSON. Copy the full console output and try again.");
+    }
+  });
 </script>
 
 </body>
