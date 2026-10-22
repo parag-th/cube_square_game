@@ -88,7 +88,7 @@
   .mode-list { display: flex; flex-direction: column; gap: 12px; margin-bottom: 4px; }
   .mode-btn {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    text-align: left; width: 100%; background: var(--bg-deep);
+    text-align: left; width: 100%; background: var(--bg-deep); color: var(--ink);
     border: 1.5px solid var(--panel-line); border-radius: 16px;
     padding: 16px 18px; transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
   }
@@ -109,6 +109,9 @@
 
   .timer-note { color: var(--muted); font-size: 13px; margin-top: 22px; text-align: center; }
   .timer-note b { color: var(--ink); font-weight: 600; }
+
+  .mode-btn .mode-text .mode-avg { display: block; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .mode-btn .mode-text .mode-avg b { color: var(--ink); font-weight: 600; }
 
   button { font-family: var(--font-body); cursor: pointer; border: none; outline-offset: 3px; background: none; }
 
@@ -177,6 +180,18 @@
     text-decoration: underline; text-underline-offset: 3px; padding: 6px;
   }
   .link-btn:hover { color: var(--ink); }
+  .end-row .link-btn + .link-btn { margin-left: 14px; }
+
+  .pause-overlay {
+    position: absolute; inset: 0; z-index: 5; background: var(--panel);
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 32px 28px; text-align: center;
+  }
+  .pause-overlay.active { display: flex; }
+  .pause-overlay h2 { font-family: var(--font-display); font-size: 28px; margin: 0; }
+  .pause-overlay p { color: var(--muted); font-size: 14px; line-height: 1.55; margin: 0 0 6px; max-width: 30ch; }
+
+  .summary-view .summary-delta { color: var(--ink); font-size: 14px; line-height: 1.5; margin: -6px 0 14px; }
 
   /* ---------- Summary screen ---------- */
   .summary-view { display: none; }
@@ -225,6 +240,7 @@
           <span class="mode-text">
             <span class="mode-title">Squares</span>
             <span class="mode-sub">See "7&sup2;", type 49</span>
+            <span class="mode-avg" id="squaresAvg">Avg of last 5: &ndash;</span>
           </span>
           <span class="mode-stats">
             <span class="mini-stat">
@@ -241,6 +257,7 @@
           <span class="mode-text">
             <span class="mode-title">Cubes</span>
             <span class="mode-sub">See "7&sup3;", type 343</span>
+            <span class="mode-avg" id="cubesAvg">Avg of last 5: &ndash;</span>
           </span>
           <span class="mode-stats">
             <span class="mini-stat">
@@ -286,7 +303,8 @@
       <div class="feedback" id="feedback">&nbsp;</div>
 
       <div class="end-row">
-        <button class="link-btn" id="endBtn">End game</button>
+        <button type="button" class="link-btn" id="pauseBtn">Pause</button>
+        <button type="button" class="link-btn" id="endBtn">End game</button>
       </div>
     </div>
 
@@ -294,6 +312,7 @@
     <div class="summary-view" id="summaryView">
       <h2 id="summaryHeading">Game over</h2>
       <p class="summary-sub" id="summarySub">You ended the round early.</p>
+      <p class="summary-delta" id="summaryDelta"></p>
 
       <div style="display:flex; gap: 8px; flex-wrap: wrap;">
         <div id="newBestBadge" style="display:none;" class="new-best">New high score</div>
@@ -325,12 +344,28 @@
           <div class="stat-label">Best time</div>
           <div class="stat-value" id="finalBestTime">&ndash;</div>
         </div>
+        <div class="stat-box">
+          <div class="stat-label">Avg score (last 5)</div>
+          <div class="stat-value" id="finalAvgScore">&ndash;</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Avg time (last 5)</div>
+          <div class="stat-value" id="finalAvgTime">&ndash;</div>
+        </div>
       </div>
 
       <button class="btn-primary" id="playAgainBtn">Play again</button>
       <div class="end-row">
         <button class="link-btn" id="changeModeBtn">Change mode</button>
       </div>
+    </div>
+
+    <!-- PAUSE OVERLAY -->
+    <div class="pause-overlay" id="pauseOverlay" role="dialog" aria-label="Game paused">
+      <h2>Paused</h2>
+      <p>Your timers are stopped. Time spent paused doesn't count towards your completion time.</p>
+      <button type="button" class="btn-primary" id="resumeBtn">Resume</button>
+      <button type="button" class="link-btn" id="pauseEndBtn">End game</button>
     </div>
 
   </div>
@@ -344,6 +379,7 @@
   const PRO_SECONDS = 3;
   const CORRECT_POINTS = 10;
   const INCORRECT_POINTS = -4;
+  const RECENT_MAX = 5; // how many recent completed rounds feed the "last 5" average
 
   const RANGES = {
     squares: { lo: 2, hi: 20, power: 2, label: "Square", sup: "2" },
@@ -371,6 +407,36 @@
     if (window.cloudSave) window.cloudSave();
   }
 
+  // Rolling history of the last completed rounds (newest first), kept per mode and per Normal/Pro tier.
+  // Stored as plain numeric keys so the cloud sync can carry them:
+  //   sc_<mode>_<tier>_recentCount / _recentStamp / _recentScore0-4 / _recentTimeMs0-4
+  function recentPrefix(gameMode, pro) {
+    return "sc_" + gameMode + "_" + (pro ? "pro" : "normal") + "_recent";
+  }
+  function loadRecent(prefix) {
+    const count = Math.min(RECENT_MAX, Math.max(0, loadNumber(prefix + "Count")));
+    const list = [];
+    for (let i = 0; i < count; i++) {
+      list.push({ score: loadNumber(prefix + "Score" + i), timeMs: loadNumber(prefix + "TimeMs" + i) });
+    }
+    return list;
+  }
+  function saveRecent(prefix, list) {
+    saveNumber(prefix + "Count", list.length);
+    saveNumber(prefix + "Stamp", Date.now());
+    for (let i = 0; i < RECENT_MAX; i++) {
+      const item = list[i];
+      saveNumber(prefix + "Score" + i, item ? item.score : 0);
+      saveNumber(prefix + "TimeMs" + i, item ? item.timeMs : 0);
+    }
+  }
+  function averages(list) {
+    if (!list || !list.length) return null;
+    let s = 0, t = 0;
+    list.forEach(function (r) { s += r.score; t += r.timeMs; });
+    return { score: s / list.length, timeMs: t / list.length, n: list.length };
+  }
+
   function formatTime(ms) {
     if (ms === null || ms === undefined || ms <= 0) return "\u2013";
     const totalSeconds = ms / 1000;
@@ -393,6 +459,8 @@
   const squaresHigh = document.getElementById("squaresHigh");
   const cubesHigh = document.getElementById("cubesHigh");
   const squaresBestTime = document.getElementById("squaresBestTime");
+  const squaresAvg = document.getElementById("squaresAvg");
+  const cubesAvg = document.getElementById("cubesAvg");
   const cubesBestTime = document.getElementById("cubesBestTime");
   const modeSquares = document.getElementById("modeSquares");
   const modeCubes = document.getElementById("modeCubes");
@@ -411,6 +479,13 @@
   const endBtn = document.getElementById("endBtn");
   const playAgainBtn = document.getElementById("playAgainBtn");
   const changeModeBtn = document.getElementById("changeModeBtn");
+  const pauseBtn = document.getElementById("pauseBtn");
+  const pauseOverlay = document.getElementById("pauseOverlay");
+  const resumeBtn = document.getElementById("resumeBtn");
+  const pauseEndBtn = document.getElementById("pauseEndBtn");
+  const finalAvgScore = document.getElementById("finalAvgScore");
+  const finalAvgTime = document.getElementById("finalAvgTime");
+  const summaryDelta = document.getElementById("summaryDelta");
 
   const finalScore = document.getElementById("finalScore");
   const finalTime = document.getElementById("finalTime");
@@ -436,6 +511,14 @@
   let advanceTimer = null;
   let countdownInterval = null;
   let timeLeft = QUESTION_SECONDS;
+  let advanceDueAt = 0;
+
+  // Pause state. Paused time is tracked so it never counts towards the completion time.
+  let paused = false;
+  let pauseStartedAt = 0;
+  let pausedTotalMs = 0;
+  let pendingAdvance = false;
+  let advanceRemaining = 0;
 
   let questionQueue = [];
   let queueIndex = 0;
@@ -447,6 +530,15 @@
     squaresBestTime.textContent = formatTime(loadNumber(sqKeys.time));
     cubesHigh.textContent = loadNumber(cbKeys.high);
     cubesBestTime.textContent = formatTime(loadNumber(cbKeys.time));
+    squaresAvg.innerHTML = avgHtml("squares");
+    cubesAvg.innerHTML = avgHtml("cubes");
+  }
+
+  function avgHtml(mode) {
+    const a = averages(loadRecent(recentPrefix(mode, proMode)));
+    if (!a) return "Avg of last 5: \u2013";
+    return (a.n === 1 ? "Last round" : "Avg of last " + a.n) +
+      ": <b>" + Math.round(a.score) + "</b> pts \u00b7 <b>" + formatTime(a.timeMs) + "</b>";
   }
 
   proToggle.addEventListener("click", function (e) {
@@ -479,11 +571,14 @@
     if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
   }
 
-  function startCountdown() {
+  // resume=true keeps the time that was left on the question instead of resetting it.
+  function startCountdown(resume) {
     stopCountdown();
-    timeLeft = QUESTION_SECONDS;
-    timerFill.style.width = "100%";
-    timerFill.classList.remove("urgent");
+    if (!resume) {
+      timeLeft = QUESTION_SECONDS;
+      timerFill.classList.remove("urgent");
+    }
+    timerFill.style.width = Math.max(0, (timeLeft / QUESTION_SECONDS) * 100) + "%";
     countdownInterval = setInterval(function () {
       timeLeft -= 0.1;
       const pct = Math.max(0, (timeLeft / QUESTION_SECONDS) * 100);
@@ -494,6 +589,46 @@
         handleTimeout();
       }
     }, 100);
+  }
+
+  // Elapsed round time, excluding anything spent paused.
+  function elapsedNow() {
+    const now = paused ? pauseStartedAt : Date.now();
+    return Math.max(0, now - startTime - pausedTotalMs);
+  }
+
+  function scheduleAdvance(delay) {
+    advanceDueAt = Date.now() + delay;
+    advanceTimer = setTimeout(function () { advanceTimer = null; newQuestion(); }, delay);
+  }
+
+  function pauseGame() {
+    if (paused || !gameView.classList.contains("active")) return;
+    paused = true;
+    pauseStartedAt = Date.now();
+    stopCountdown();
+    if (advanceTimer) {
+      clearTimeout(advanceTimer);
+      advanceTimer = null;
+      advanceRemaining = Math.max(0, advanceDueAt - pauseStartedAt);
+      pendingAdvance = true;
+    }
+    pauseOverlay.classList.add("active");
+    resumeBtn.focus();
+  }
+
+  function resumeGame() {
+    if (!paused) return;
+    pausedTotalMs += Date.now() - pauseStartedAt;
+    paused = false;
+    pauseOverlay.classList.remove("active");
+    if (pendingAdvance) {
+      pendingAdvance = false;
+      scheduleAdvance(advanceRemaining);
+    } else if (!awaitingNext) {
+      startCountdown(true);
+      answerInput.focus();
+    }
   }
 
   function correctAnswer() {
@@ -519,7 +654,7 @@
     answerInput.disabled = false;
     awaitingNext = false;
     answerInput.focus();
-    startCountdown();
+    startCountdown(false);
   }
 
   function updateStreakLine() {
@@ -540,8 +675,13 @@
     incorrectCount = 0;
     streak = 0;
     sessionBestStreak = 0;
+    paused = false;
+    pausedTotalMs = 0;
+    pendingAdvance = false;
+    pauseOverlay.classList.remove("active");
     startTime = Date.now();
     scoreDisplay.textContent = "0";
+
     liveHighScore.textContent = loadNumber(keysFor(gameMode, proMode).high);
     updateStreakLine();
 
@@ -584,17 +724,17 @@
     if (score > currentHigh) liveHighScore.textContent = score;
     updateStreakLine();
 
-    advanceTimer = setTimeout(newQuestion, isCorrect ? 700 : 1400);
+    scheduleAdvance(isCorrect ? 700 : 1400);
   }
 
   function handleTimeout() {
-    if (awaitingNext) return;
+    if (awaitingNext || paused) return;
     finishAnswer(false, false);
   }
 
   function handleSubmit(e) {
     e.preventDefault();
-    if (awaitingNext) return;
+    if (awaitingNext || paused) return;
     const raw = answerInput.value;
     if (raw === "") return;
     const given = parseInt(raw, 10);
@@ -605,6 +745,13 @@
     if (advanceTimer) { clearTimeout(advanceTimer); advanceTimer = null; }
     stopCountdown();
 
+    // Leaving while paused: close the overlay and discard the pause (an early end has no completion time anyway).
+    if (paused) {
+      paused = false;
+      pendingAdvance = false;
+      pauseOverlay.classList.remove("active");
+    }
+
     gameView.classList.remove("active");
     summaryView.classList.add("active");
 
@@ -612,7 +759,7 @@
     const priorHigh = loadNumber(keys.high);
     const priorStreak = loadNumber(keys.streak);
     const priorTime = loadNumber(keys.time);
-    const elapsedMs = completed ? (Date.now() - startTime) : null;
+    const elapsedMs = completed ? elapsedNow() : null;
 
     let isNewBest = false;
     if (score > priorHigh) { saveNumber(keys.high, score); isNewBest = true; }
@@ -626,6 +773,30 @@
       bestTimeToShow = elapsedMs;
     }
 
+    // Compare against the average from BEFORE this round, then fold this round in.
+    const rPrefix = recentPrefix(gameMode, proMode);
+    let recentList = loadRecent(rPrefix);
+    const prevAvg = averages(recentList);
+    if (completed) {
+      recentList = [{ score: score, timeMs: elapsedMs }].concat(recentList).slice(0, RECENT_MAX);
+      saveRecent(rPrefix, recentList);
+    }
+    const newAvg = averages(recentList);
+
+    if (!completed) {
+      summaryDelta.textContent = "Finish a full round to add it to your last-5 average.";
+    } else if (!prevAvg) {
+      summaryDelta.textContent = "First completed round \u2014 this starts your last-5 average.";
+    } else {
+      const dt = elapsedMs - prevAvg.timeMs;
+      const dsRounded = Math.round(score - prevAvg.score);
+      const timePart = Math.abs(dt) < 50 ? "time on your average"
+        : "time " + (Math.abs(dt) / 1000).toFixed(1) + "s" + (dt < 0 ? " faster" : " slower");
+      const scorePart = "score " + (dsRounded > 0 ? "+" : "") + dsRounded;
+      summaryDelta.textContent = "vs your " + (prevAvg.n === 1 ? "last round" : "last-" + prevAvg.n + " average") +
+        ": " + timePart + ", " + scorePart + ".";
+    }
+
     summaryHeading.textContent = completed ? "Round complete" : "Game over";
     summarySub.textContent = completed
       ? ("You've been through every " + RANGES[gameMode].label.toLowerCase() + " in range.")
@@ -637,6 +808,8 @@
     finalIncorrect.textContent = incorrectCount;
     finalStreak.textContent = sessionBestStreak;
     finalBestTime.textContent = formatTime(bestTimeToShow);
+    finalAvgScore.textContent = newAvg ? Math.round(newAvg.score) : "\u2013";
+    finalAvgTime.textContent = newAvg ? formatTime(newAvg.timeMs) : "\u2013";
     newBestBadge.style.display = isNewBest ? "inline-block" : "none";
     newBestTimeBadge.style.display = isNewBestTime ? "inline-block" : "none";
 
@@ -651,7 +824,17 @@
     summaryView.classList.remove("active");
     startView.classList.remove("hidden");
   });
+  pauseBtn.addEventListener("click", pauseGame);
+  resumeBtn.addEventListener("click", resumeGame);
   endBtn.addEventListener("click", function () { endGame(false); });
+  pauseEndBtn.addEventListener("click", function () { endGame(false); });
+
+  // Escape toggles pause while a round is running.
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && gameView.classList.contains("active")) {
+      if (paused) resumeGame(); else pauseGame();
+    }
+  });
   answerForm.addEventListener("submit", handleSubmit);
 
   // Lets the Firebase sync code refresh the screen after cloud data is loaded.
@@ -671,8 +854,8 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
   import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-import { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider,
-         linkWithPopup, signInWithPopup, signInWithCredential } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+  import { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider,
+           linkWithPopup, signInWithCredential } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyB9_ru2zDvDtsyFl48Jv_r-h0ZfZf-39ys",
@@ -717,11 +900,15 @@ import { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider,
 
   // Keep the best of both sides. Scores/streaks: higher wins.
   // Best times (…_bestTimeMs): lower wins, and 0 means "no time yet".
+  // The rolling "last 5 rounds" history can't be merged key-by-key (max/min would scramble it),
+  // so each mode+tier's whole history is taken from whichever side was updated most recently.
+  const RECENT_RE = /^sc_(squares|cubes)_(normal|pro)_recent/;
   function merge(a, b) {
     a = a || {}; b = b || {};
     const out = {};
     new Set([...Object.keys(a), ...Object.keys(b)]).forEach(function (k) {
       if (!k.startsWith(PREFIX)) return;
+      if (RECENT_RE.test(k)) return; // handled as a group below
       const x = num(a[k]), y = num(b[k]);
       if (k.endsWith("_bestTimeMs")) {
         out[k] = x > 0 && y > 0 ? Math.min(x, y) : Math.max(x, y);
@@ -729,18 +916,26 @@ import { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider,
         out[k] = Math.max(x, y);
       }
     });
+    ["squares", "cubes"].forEach(function (m) {
+      ["normal", "pro"].forEach(function (tier) {
+        const base = PREFIX + m + "_" + tier + "_recent";
+        const stampKey = base + "Stamp";
+        if (!num(a[stampKey]) && !num(b[stampKey])) return; // no history on either side
+        const src = num(a[stampKey]) >= num(b[stampKey]) ? a : b;
+        const keys = [base + "Count", stampKey];
+        for (let i = 0; i < 5; i++) keys.push(base + "Score" + i, base + "TimeMs" + i);
+        keys.forEach(function (k) { out[k] = num(src[k]); });
+      });
+    });
     return out;
   }
 
-function refreshButtons() {
-  // Show the Google button if there is no user OR if the user is currently anonymous
-  const isGoogleUser = currentUser && !currentUser.isAnonymous;
-  googleBtn.style.display = isGoogleUser ? "none" : "inline-block";
-  
-  statusEl.textContent = !currentUser ? "Cloud: offline"
-    : currentUser.isAnonymous ? "Cloud: synced (this browser only)"
-    : "Cloud: synced (" + (currentUser.email || "Google") + ")";
-}
+  function refreshButtons() {
+    googleBtn.style.display = currentUser && currentUser.isAnonymous ? "inline-block" : "none";
+    statusEl.textContent = !currentUser ? "Cloud: offline"
+      : currentUser.isAnonymous ? "Cloud: synced (this browser only)"
+      : "Cloud: synced (" + (currentUser.email || "Google") + ")";
+  }
 
   async function pushToCloud() {
     if (!currentUser || !ready) return;
@@ -771,42 +966,40 @@ function refreshButtons() {
     refreshButtons();
   }
 
+  // IMPORTANT: don't call signInAnonymously() unconditionally at startup. Doing so on every page load
+  // replaced the restored Google session with a brand-new anonymous user (hence the repeated Google sign-in).
+  // onAuthStateChanged first fires once Firebase has restored any saved session, so we only create an
+  // anonymous account when it reports that nobody is signed in.
+  let anonAttempted = false;
   onAuthStateChanged(auth, function (user) {
     currentUser = user;
     refreshButtons();
-    if (user) syncDown(user);
-  });
-  signInAnonymously(auth).catch(function (e) {
-    console.error("Anonymous sign-in failed", e);
-    statusEl.textContent = "Cloud: sign-in failed (see console)";
+    if (user) { syncDown(user); return; }
+    if (!anonAttempted) {
+      anonAttempted = true;
+      signInAnonymously(auth).catch(function (e) {
+        console.error("Anonymous sign-in failed", e);
+        statusEl.textContent = "Cloud: sign-in failed (see console)";
+      });
+    }
   });
 
   // Upgrade the anonymous account to Google so scores follow you across devices.
   googleBtn.addEventListener("click", async function () {
-  const provider = new GoogleAuthProvider();
-  try {
-    if (auth.currentUser && auth.currentUser.isAnonymous) {
-      // 1. Upgrade/Link current anonymous guest session to Google
+    const provider = new GoogleAuthProvider();
+    try {
       await linkWithPopup(auth.currentUser, provider);
-    } else {
-      // 2. Direct sign-in with Google if not currently logged in as anonymous user
-      await signInWithPopup(auth, provider);
-    }
-    currentUser = auth.currentUser;
-    refreshButtons();
-  } catch (e) {
-    if (e.code === "auth/credential-already-in-use") {
-      try {
+      currentUser = auth.currentUser;
+      refreshButtons();
+    } catch (e) {
+      if (e.code === "auth/credential-already-in-use") {
         await signInWithCredential(auth, GoogleAuthProvider.credentialFromError(e));
-      } catch (err) {
-        console.error("Credential sign-in failed", err);
+      } else {
+        console.error(e);
+        alert("Google sign-in failed: " + (e.code || e.message));
       }
-    } else {
-      console.error(e);
-      alert("Google sign-in failed: " + (e.message || e.code));
     }
-  }
-});
+  });
 
   // Import the JSON copied from the old local file. Extra keys from other games are ignored.
   importBtn.addEventListener("click", function () {
